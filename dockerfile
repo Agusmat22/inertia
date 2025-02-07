@@ -1,67 +1,86 @@
-# Etapa 1: Construcción del backend de Laravel
+##############################
+# Stage 1: Construir el backend de Laravel
+##############################
 FROM php:8.2-fpm AS backend
 
-# Instalar dependencias del sistema
+# Instalar dependencias del sistema y extensiones PHP necesarias
 RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpng-dev \
+    libonig-dev \
+    libxml2-dev \
+    zip \
     unzip \
     git \
-    curl \
-    libpng-dev \
-    libjpeg-dev \
-    libfreetype6-dev \
-    libzip-dev \
-    zip \
-    && docker-php-ext-configure gd \
-    && docker-php-ext-install gd pdo pdo_mysql zip
+    curl
 
-# Instalar Composer
+# Instalar extensiones PHP
+RUN docker-php-ext-install pdo pdo_mysql mbstring exif pcntl bcmath gd
+
+# Instalar Composer desde la imagen oficial de Composer
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
-# Crear usuario para la aplicación
-RUN useradd -m laravel
-WORKDIR /var/www/html
+# Establecer directorio de trabajo
+WORKDIR /var/www
 
-# Copiar el código de Laravel al contenedor
+# Copiar archivos mínimos necesarios: composer.json, composer.lock, artisan,
+# el directorio bootstrap (que contiene app.php) y routes
+COPY composer.json composer.lock artisan ./
+COPY bootstrap ./bootstrap
+COPY routes ./routes
+
+# Ejecutar composer install para generar la carpeta vendor
+# (la salida de ls servirá para confirmar que vendor se generó correctamente)
+RUN composer install --no-dev --optimize-autoloader && \
+    echo "Contenido de /var/www/vendor:" && ls -la /var/www/vendor
+
+# Copiar el resto del código de la aplicación
+# Gracias a .dockerignore (que debe contener "vendor"), no se sobrescribe la carpeta vendor generada
 COPY . .
 
-# Instalar dependencias de Laravel
-RUN composer install --no-dev --optimize-autoloader
+# Ajustar permisos para storage y bootstrap/cache
+RUN chown -R www-data:www-data /var/www/storage /var/www/bootstrap/cache
 
-# Permisos para Laravel
-RUN chown -R laravel:laravel /var/www/html
-USER laravel
-
-# Etapa 2: Construcción del frontend con React + Vite
+##############################
+# Stage 2: Construir el frontend con React e Inertia (Vite)
+##############################
 FROM node:18 AS frontend
+
 WORKDIR /app
 
-# Copiar archivos necesarios para instalar dependencias
-COPY package.json package-lock.json /app/
-
-# Instalar dependencias de frontend
+# Copiar archivos de Node y instalar dependencias
+COPY package.json package-lock.json ./
 RUN npm install
 
-# Copiar el código del frontend y compilar con Vite
-COPY . /app
+# Copiar el resto del código y compilar los assets
+COPY . .
 RUN npm run build
 
-# Etapa 3: Contenedor final con Nginx para servir la SPA
-FROM nginx
+##############################
+# Stage 3: Imagen final combinada (PHP-FPM + assets compilados)
+##############################
+FROM php:8.2-fpm
 
-# Copiar configuración de Nginx
-COPY docker/nginx.conf /etc/nginx/nginx.conf
+# Instalar dependencias y extensiones PHP en tiempo de ejecución
+RUN apt-get update && apt-get install -y \
+    libpng-dev \
+    libonig-dev \
+    libxml2-dev \
+    zip \
+    unzip && \
+    docker-php-ext-install pdo pdo_mysql mbstring exif pcntl bcmath gd
 
-# Copiar el backend de Laravel
-COPY --from=backend /var/www/html /var/www/html
+WORKDIR /var/www
 
-# Copiar los archivos compilados de React (Vite)
-COPY --from=frontend /app/public /var/www/html/public
+# Copiar el backend completo (incluye vendor generado) desde la etapa 1
+COPY --from=backend /var/www .
 
-# Configurar permisos para Nginx
-RUN chown -R www-data:www-data /var/www/html
+# Copiar los assets compilados desde la etapa 2 (normalmente generados en /app/public/build)
+COPY --from=frontend /app/public/build ./public/build
 
-# Exponer el puerto 80
-EXPOSE 80
+# Ajustar permisos para que PHP-FPM pueda acceder a todos los archivos
+RUN chown -R www-data:www-data /var/www
 
-# Comando de inicio
-CMD ["nginx", "-g", "daemon off;"]
+EXPOSE 9000
+
+CMD ["php-fpm"]
